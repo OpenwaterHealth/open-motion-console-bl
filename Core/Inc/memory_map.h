@@ -17,8 +17,7 @@
   *   Addr range              Size   Sct   Region            Access (via DFU)
   *  ---------------------------------------------------------------------------
   *  0x08000000-0x0801FFFF    128K   0     BOOTLOADER         read-only
-  *  0x08020000-0x0809FFFF    512K   1-4   APP SLOT 1 (active) read/erase/write
-  *  0x080A0000-0x0811FFFF    512K   5-8   APP SLOT 2 (spare)  read/erase/write
+  *  0x08020000-0x0811FFFF   1024K   1-8   APP SLOT 1 (active) read/erase/write
   *  0x08120000-0x081DFFFF    768K   9-14  RESERVED (future)   read/erase/write
   *  0x081E0000-0x081FFFFF    128K   15    USER CONFIG         read-only
   *  ---------------------------------------------------------------------------
@@ -27,8 +26,8 @@
   *  Notes:
   *   - The BOOTLOADER sector and the USER CONFIG sector are NOT writable or
   *     erasable through the DFU interface. The bootloader may READ user config.
-  *   - The bootloader currently boots APP SLOT 1. SLOT 2 is reserved for a
-  *     future dual-slot / A-B update scheme and is not yet referenced by SBSFU.
+  *   - The bootloader boots APP SLOT 1 (the only active slot in this
+  *     single-image configuration).
   *   - Inside a slot the first @ref MEM_APP_IMAGE_OFFSET bytes hold the signed
   *     image header; the application is linked to run at SLOT_START + that offset.
   *   - RESERVED is unallocated flash kept free for future features.
@@ -50,15 +49,10 @@
 #define MEM_BOOTLOADER_SIZE       (0x00020000UL)   /* 128 KB                      */
 #define MEM_BOOTLOADER_END        (MEM_BOOTLOADER_BASE + MEM_BOOTLOADER_SIZE)
 
-/* ── Application slot 1 — active (sectors 1-4, 512 KB) ─────────────────────── */
+/* ── Application slot 1 — active (sectors 1-8, 1024 KB) ────────────────────── */
 #define MEM_SLOT1_BASE            (0x08020000UL)
-#define MEM_SLOT1_SIZE            (0x00080000UL)   /* 512 KB                      */
+#define MEM_SLOT1_SIZE            (0x00100000UL)   /* 1024 KB                     */
 #define MEM_SLOT1_END             (MEM_SLOT1_BASE + MEM_SLOT1_SIZE)
-
-/* ── Application slot 2 — spare/future (sectors 5-8, 512 KB) ───────────────── */
-#define MEM_SLOT2_BASE            (0x080A0000UL)
-#define MEM_SLOT2_SIZE            (0x00080000UL)   /* 512 KB                      */
-#define MEM_SLOT2_END             (MEM_SLOT2_BASE + MEM_SLOT2_SIZE)
 
 /* ── Reserved for future use (sectors 9-14, 768 KB) ───────────────────────── */
 #define MEM_RESERVED_BASE         (0x08120000UL)
@@ -79,11 +73,12 @@
 /* Address the active application is linked to / executes from. */
 #define MEM_APP_RUN_ADDRESS       (MEM_SLOT1_BASE + MEM_APP_IMAGE_OFFSET) /* 0x08020400 */
 
-/* ── DFU writable window (everything except bootloader + user config) ─────── */
-/* The DFU interface accepts erase/write only within [BASE, END). Both the
-   bootloader sector (below BASE) and the user-config sector (at END) are
-   excluded, making them effectively read-only over DFU. */
-#define MEM_DFU_WRITABLE_BASE     (MEM_SLOT1_BASE)        /* 0x08020000 */
-#define MEM_DFU_WRITABLE_END      (MEM_USER_CONFIG_BASE)  /* 0x081E0000 (exclusive) */
+/* ── DFU writable window (active application slot only) ──────────────────── */
+/* The DFU interface accepts erase/write only within [BASE, END). Clamped to
+   the active slot so all DFU-writable flash is covered by SBSFU signature
+   verification; the bootloader, reserved sectors and user-config sector are
+   all read-only over DFU. */
+#define MEM_DFU_WRITABLE_BASE     (MEM_SLOT1_BASE)   /* 0x08020000 */
+#define MEM_DFU_WRITABLE_END      (MEM_SLOT1_END)    /* 0x08120000 (exclusive) */
 
 #endif /* MEMORY_MAP_H */

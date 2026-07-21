@@ -82,22 +82,22 @@ static uint16_t s_current_fw_version = 0U;  /* installed FwVersion at DFU entry 
  * DfuSe sector type letters encode access (bit0=read, bit1=erase, bit2=write):
  *   'a' = 1 = read-only,  'g' = 7 = read+erase+write.
  *   sector 0        bootloader               read-only  -> 01*128Ka
- *   sectors 1-4     active app slot          r/w/erase  -> 04*128Kg
- *   sectors 5-15    reserved/floor/config    read-only  -> 11*128Ka
+ *   sectors 1-8     active app slot          r/w/erase  -> 08*128Kg
+ *   sectors 9-15    reserved/config          read-only  -> 07*128Ka
  * The DFU writable window is clamped to the SBSFU active slot
- * (SLOT_ACTIVE_1: 0x08020000-0x0809FFFF, see Linker/mapping_fwimg.ld) so that
+ * (SLOT_ACTIVE_1: 0x08020000-0x0811FFFF, see Linker/mapping_fwimg.ld) so that
  * ALL DFU-writable flash is covered by secure-boot slot verification. Everything
- * else — bootloader (sector 0), the anti-rollback floor (sector 14, 0x081C0000)
- * and user config (sector 15, 0x081E0000) — is read-only over DFU. */
-#define FLASH_DESC_STR      "@Internal Flash/0x08000000/01*128Ka,04*128Kg,11*128Ka"
+ * else — bootloader (sector 0), reserved sectors 9-14, and user config
+ * (sector 15, 0x081E0000) — is read-only over DFU. */
+#define FLASH_DESC_STR      "@Internal Flash/0x08000000/01*128Ka,08*128Kg,07*128Ka"
 
 /* DFU writable window: the active application slot only. The bootloader (below
- * APP_FLASH_BASE) and everything at/above FLASH_END_ADDR (reserved flash, the
- * anti-rollback floor, and the user-config sector) are excluded and cannot be
- * erased or written over DFU. FLASH_END_ADDR is the active-slot end + 1
- * (SLOT_ACTIVE_1_END = 0x0809FFFF in Linker/mapping_fwimg.ld). */
+ * APP_FLASH_BASE) and everything at/above FLASH_END_ADDR (reserved flash and
+ * the user-config sector) are excluded and cannot be erased or written over
+ * DFU. FLASH_END_ADDR is the active-slot end + 1
+ * (SLOT_ACTIVE_1_END = 0x0811FFFF in Linker/mapping_fwimg.ld). */
 #define APP_FLASH_BASE      0x08020000UL  /* MEM_DFU_WRITABLE_BASE (active slot start) */
-#define FLASH_END_ADDR      0x080A0000UL  /* MEM_DFU_WRITABLE_END (active slot end + 1, exclusive) */
+#define FLASH_END_ADDR      0x08120000UL  /* MEM_DFU_WRITABLE_END (active slot end + 1, exclusive) */
 #define DFU_SECTOR_SIZE     0x00020000UL  /* 128KB per sector */
 #ifndef FLASH_BANK2_BASE
 #define FLASH_BANK2_BASE    0x08100000UL  /* start of bank 2 */

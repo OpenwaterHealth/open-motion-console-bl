@@ -156,7 +156,7 @@ python py-tools/sign_firmware.py \
     --firmware    path/to/your_app.bin \
     --private-key py-tools/keys/ecdsa_private.pem \
     --aes-key     py-tools/keys/aes128.bin \
-    --version     1 \
+    --version     1.0.0 \
     --output      your_app_signed.bin
 ```
 
@@ -165,7 +165,7 @@ python py-tools/sign_firmware.py \
 | `--firmware` | *(required)* | Raw `.bin` built for `0x08020400` (step 5) |
 | `--private-key` | `py-tools/keys/ecdsa_private.pem` | ECDSA P-256 private key |
 | `--aes-key` | `py-tools/keys/aes128.bin` | Raw 16-byte AES-128 key |
-| `--version` | `1` | 16-bit firmware version (1–65535) for anti-rollback — see [Firmware versioning & anti-rollback](#firmware-versioning--anti-rollback) |
+| `--version` | `0.0.1` | Firmware version, dotted semver `MAJOR.MINOR.PATCH` (a raw uint16 is also accepted) — see [Firmware versioning & anti-rollback](#firmware-versioning--anti-rollback) |
 | `--output` | `<firmware>_signed.bin` | Output path |
 
 ### Signed-image layout (what gets flashed to the slot)
@@ -186,36 +186,51 @@ Offset 0x400 [FwSize] Firmware body  (CLEAR — see note)
 ### Firmware versioning & anti-rollback
 
 The signed header carries a **16-bit `FwVersion`** (offset `0x006`, inside the
-ECDSA-signed region). `--version` sets it as a raw integer (1–65535); because it
-is signed, it cannot be altered without re-signing.
+ECDSA-signed region). `--version` sets it; because it is signed, it cannot be
+altered without re-signing.
 
-**Encoding convention — `MMmmpp`.** Encode the release semantic version as a
-single integer:
+**Encoding — packed semver (`major[15:11] . minor[10:5] . patch[4:0]`).**
+`sign_firmware.py` packs a dotted `MAJOR.MINOR.PATCH` argument into the 16-bit
+field as:
 
 ```
-FwVersion = major*10000 + minor*100 + patch
+FwVersion = (major << 11) | (minor << 5) | patch
 ```
 
-| Semver | `--version` |
-|--------|-------------|
-| 1.0.0  | `10000` |
-| 1.8.0  | `10800` |
-| 1.9.3  | `10903` |
-| 2.0.0  | `20000` |
+| Field | Bits | Range |
+|-------|------|-------|
+| major | `[15:11]` (5) | 0–31 |
+| minor | `[10:5]`  (6) | 0–63 |
+| patch | `[4:0]`   (5) | 0–31 |
 
-This keeps the integer **monotonic** with semver ordering. Limits: `minor` and
-`patch` are each `0–99`, and `major ≤ 6` (the packed value must fit 16 bits,
-`≤ 65535`). Pre-release suffixes are **not** encoded — `1.8.0-rc.1`, `1.8.0-dev.2`
-and `1.8.0` all map to `10800`.
+Max encodable version is `31.63.31` = `0xFFFF`. **`0.0.0` is invalid** (packs to
+`0`, which SBSFU reserves for "no firmware"); the minimum valid release is
+`0.0.1`. Pre-release suffixes are **not** encoded — `1.8.0-rc.1`, `1.8.0-dev.2`
+and `1.8.0` all map to the same integer.
 
-The release/CI build derives it from the git tag, e.g.:
+| Semver | `--version` | Packed |
+|--------|-------------|--------|
+| 0.0.1  | `0.0.1` | `0x0001` (1) |
+| 1.0.0  | `1.0.0` | `0x0800` (2048) |
+| 1.8.0  | `1.8.0` | `0x0900` (2304) |
+| 1.9.3  | `1.9.3` | `0x0923` (2339) |
+| 2.0.0  | `2.0.0` | `0x1000` (4096) |
+| 31.63.31 | `31.63.31` | `0xFFFF` (65535) |
+
+Because each field occupies a contiguous non-overlapping bit range sized to its
+max value, the packed integer is **strictly monotonic** with `(major, minor,
+patch)` ordering — so the bootloader's anti-rollback compare is a plain
+unsigned `<` and needs no knowledge of the scheme.
+
+The release/CI build passes the git tag directly:
 
 ```sh
 VER="${TAG%%-*}"                          # 1.8.0-rc.1 -> 1.8.0
-IFS=. read -r MAJ MIN PAT <<< "$VER"
-FWVER=$(( MAJ*10000 + MIN*100 + PAT ))     # -> 10800
-python py-tools/sign_firmware.py --firmware app.bin --version "$FWVER" --output app_signed.bin
+python py-tools/sign_firmware.py --firmware app.bin --version "$VER" --output app_signed.bin
 ```
+
+> A raw integer (decimal or `0x`-prefixed hex) in `1..65535` is also accepted
+> by `--version` for advanced use.
 
 **Anti-rollback (downgrade protection).** The bootloader keeps a persistent,
 monotonic **version floor** — the highest `FwVersion` it has ever launched —
@@ -331,18 +346,17 @@ Addr range              Size   Sct   Region            DFU access
   0x08000000  ISR vectors
   0x08000400  SE CallGate + SECoreBin
   0x08008A00  SBSFU code
-0x08020000-0x0809FFFF   512K   1-4   APP SLOT 1 (active) read/erase/write
+0x08020000-0x0811FFFF  1024K   1-8   APP SLOT 1 (active) read/erase/write
   0x08020000    └ signed header (0x400)
   0x08020400    └ application firmware (execution address)
-0x080A0000-0x0811FFFF   512K   5-8   APP SLOT 2 (spare)  read/erase/write
 0x08120000-0x081DFFFF   768K   9-14  RESERVED (future)   read/erase/write
 0x081E0000-0x081FFFFF   128K   15    USER CONFIG         read-only
 0x08200000  End of flash
 ```
 
 > The bootloader sector and the USER CONFIG sector cannot be erased or written
-> over DFU (the bootloader may still *read* user config). SLOT 2 is reserved for
-> a future dual-slot / A-B update scheme; the bootloader currently boots SLOT 1.
+> over DFU (the bootloader may still *read* user config). This is a single-slot
+> configuration; the bootloader boots SLOT 1.
 
 ---
 

@@ -95,17 +95,17 @@ Defined in `Core/Inc/memory_map.h` (single source of truth):
 Addr range              Size   Sct   Region              Access control
 ---------------------------------------------------------------------------
 0x08000000-0x0801FFFF   128K   0     BOOTLOADER           read-only (immutable)
-0x08020000-0x0809FFFF   512K   1-4   APP SLOT 1 (active)  updatable (signed) — DFU writable window
-0x080A0000-0x081BFFFF  1408K   5-13  RESERVED             read-only via DFU
+0x08020000-0x0811FFFF  1024K   1-8   APP SLOT 1 (active)  updatable (signed) — DFU writable window
+0x08120000-0x081BFFFF   640K   9-13  RESERVED             read-only via DFU
 0x081C0000-0x081DFFFF   128K   14    ANTI-ROLLBACK FLOOR  read-only via DFU (bootloader-managed)
 0x081E0000-0x081FFFFF   128K   15    USER CONFIG          read-only via DFU (application-managed)
 ```
 
 The DFU update interface restricts erase/write to the **active application slot only**
-(`0x08020000`–`0x0809FFFF`, the SBSFU `SLOT_ACTIVE_1` extent in `Linker/mapping_fwimg.ld`). The DFU
+(`0x08020000`–`0x0811FFFF`, the SBSFU `SLOT_ACTIVE_1` extent in `Linker/mapping_fwimg.ld`). The DFU
 writable window is deliberately clamped to the slot so that **all DFU-writable flash is covered by
 secure-boot slot verification** (no writable region escapes the `VerifyActiveSlot` check). The
-bootloader sector (0), reserved sectors (5–13), the anti-rollback floor sector (14), and the
+bootloader sector (0), reserved sectors (9–13), the anti-rollback floor sector (14), and the
 user-config sector (15) are **not erasable or writable** through the firmware-update (DFU) interface.
 The anti-rollback floor sector is written only by the bootloader (during verified boot, see §5.6); the
 user-config sector is owned by the application.
@@ -239,8 +239,12 @@ To prevent an attacker from installing an older, **validly-signed but known-vuln
 version (threat T-9), the bootloader enforces a monotonic version floor:
 
 - **Version source.** Each signed image carries a 16-bit `FwVersion` in its ECDSA-signed header,
-  encoded from the release semantic version as `major×10000 + minor×100 + patch` (monotonic with
-  semver ordering). The value is supplied by the controlled build/CI pipeline at signing time.
+  packed from the release semantic version as a bit-field
+  `major[15:11] . minor[10:5] . patch[4:0]` (ranges: major 0–31, minor 0–63, patch 0–31;
+  max `31.63.31` = `0xFFFF`; `0.0.0` is invalid). Each field occupies a contiguous non-overlapping
+  bit range sized to its maximum, so the packed integer is strictly monotonic with `(major, minor,
+  patch)` ordering — an unsigned `<` compare is sufficient and the bootloader needs no knowledge
+  of the encoding scheme. The value is supplied by the controlled build/CI pipeline at signing time.
 - **Persistent floor.** The bootloader stores the highest version ever launched in a dedicated flash
   sector (sector 14, `0x081C0000`) as an append-only log. This sector is **outside the DFU writable
   window**, so a firmware update cannot erase or lower it; it is non-volatile, so the floor survives
@@ -320,10 +324,10 @@ vulnerability testing, and penetration testing.
 | TC-AUTH-02 | Image with tampered body is rejected | Flip bytes after signing; attempt boot | **Pass** (signature/hash mismatch → not executed) `[[TODO: capture log]]` |
 | TC-AUTH-03 | Image signed with wrong key is rejected | Sign with a freshly-generated (non-provisioned) ECDSA P-256 key; install via DFU | **Pass** (STM32H743): rejected at `VERIFY USER FW SIGNATURE`; not executed; enters DFU |
 | TC-INTEG-01 | SHA-256 mismatch rejected | Valid signed header, flip one body byte (offset 0x800) without re-signing; install via DFU | **Pass**: integrity check fails at `VERIFY USER FW SIGNATURE`; not executed; enters DFU |
-| TC-INTEG-02 | Extra code beyond firmware rejected | Boot a valid image, then write 0xAA bytes within the active slot beyond the firmware (0x08080000) via SWD; reset | **Pass**: `VerifyActiveSlot` detects extraneous slot content; rejected at `VERIFY USER FW SIGNATURE`; not executed; enters DFU. (Note: writes *outside* the slot end 0x0809FFFF are not part of the verified image — see §11 anomaly.) |
+| TC-INTEG-02 | Extra code beyond firmware rejected | Boot a valid image, then write 0xAA bytes within the active slot beyond the firmware (0x08080000) via SWD; reset | **Pass**: `VerifyActiveSlot` detects extraneous slot content; rejected at `VERIFY USER FW SIGNATURE`; not executed; enters DFU. (Note: writes *outside* the slot end 0x0811FFFF are not part of the verified image — see §11 anomaly.) |
 | TC-DFU-01 | DFU install of signed image succeeds | dfu-util + pure-Python flasher | **Pass** (both paths) |
 | TC-DFU-02 | DFU write to bootloader sector rejected | `dfu-util` download targeting 0x08000000 | **Pass** (STM32H743): device rejects — `Last page at 0x0800001f is not writeable`; bootloader sector unmodified |
-| TC-DFU-03 | DFU write outside the active slot rejected (AN-1 fix) | `dfu-util` download targeting 0x080A0000 (first address above the slot) | **Pass** (STM32H743): device rejects — `Last page at 0x080a001f is not writeable` (also verified at floor sector 0x081C0000 and user-config 0x081E0000) |
+| TC-DFU-03 | DFU write outside the active slot rejected (AN-1 fix) | `dfu-util` download targeting 0x08120000 (first address above the slot) | **Pass** (STM32H743): device rejects — `Last page at 0x0812001f is not writeable` (also verified at floor sector 0x081C0000 and user-config 0x081E0000) |
 | TC-USERCFG-01 | DFU write/erase of user-config rejected | Target 0x081E0000 | **Pass** ("Last page … not writeable") |
 | TC-FAILCLOSED-01 | No/invalid FW → safe recovery, no code exec | Empty slot | **Pass** (enters DFU; no unauthenticated execution) |
 | TC-IMMUT-01 | Bootloader not modifiable via update path | SHA-256 of bootloader sector 0 (0x08000000, 128 KB) before/after a DFU write attempt to 0x08000000 | **Pass** (STM32H743): write rejected (`Last page … not writeable`); sector-0 hash identical before and after (`65b0bf97…256edd6`) — bootloader unchanged |
@@ -376,7 +380,7 @@ Per FDA labeling expectations, provide to users/operators: `[[TODO: Regulatory t
 
 | ID | Anomaly | Risk assessment | Disposition |
 |----|---------|-----------------|-------------|
-| AN-1 | The DFU writable window (`0x08020000`–`0x081BFFFF`) was larger than the verified active slot (`0x08020000`–`0x0809FFFF`, `mapping_fwimg.ld`), so DFU could write flash *outside* the slot. | **Low** (never a verification bypass; out-of-slot content is not authenticated/executed). | **RESOLVED.** The DFU writable window is clamped to the active-slot end (`FLASH_END_ADDR = 0x080A0000`, DfuSe descriptor `01*128Ka,04*128Kg,11*128Ka`); writes outside the slot are now rejected (verified: TC-DFU-03). All DFU-writable flash is covered by slot verification. |
+| AN-1 | The DFU writable window (`0x08020000`–`0x081BFFFF`) was larger than the verified active slot (`0x08020000`–`0x0809FFFF`, `mapping_fwimg.ld`), so DFU could write flash *outside* the slot. | **Low** (never a verification bypass; out-of-slot content is not authenticated/executed). | **RESOLVED.** The DFU writable window is clamped to the active-slot end (`FLASH_END_ADDR = 0x08120000`, DfuSe descriptor `01*128Ka,08*128Kg,07*128Ka`); writes outside the slot are now rejected (verified: TC-DFU-03). All DFU-writable flash is covered by slot verification. |
 
 ---
 

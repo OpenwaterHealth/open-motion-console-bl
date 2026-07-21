@@ -158,7 +158,7 @@ class STM32DFU:
     # bootloader (sector 0), reserved sectors, the anti-rollback floor and the
     # user-config sector are all read-only over DFU.
     APP_FLASH_START = 0x08020000   # SBSFU active slot start (signed image goes here)
-    APP_FLASH_END   = 0x080A0000   # exclusive end of writable region (active-slot end + 1)
+    APP_FLASH_END   = 0x08120000   # exclusive end of writable region (active-slot end + 1)
 
     # Virtual UPLOAD address that returns the bootloader version string
     # (usbd_dfu_if.c DFU_VERSION_VIRT_ADDR / DFU_VERSION_READ_LEN).

@@ -26,8 +26,8 @@ secure-boot core, but a different board bring-up and a **distinct signing key**.
 | Region | Address | Notes |
 |---|---|---|
 | Bootloader | `0x08000000` (sector 0) | this image |
-| Application slot | `0x08020000`–`0x0809FFFF` (512 KB) | DFU-writable; app vectors at `0x08020400` |
-| Reserved / anti-rollback / config | `>= 0x080A0000` | read-only over DFU |
+| Application slot | `0x08020000`–`0x0811FFFF` (1024 KB) | DFU-writable; app vectors at `0x08020400` |
+| Reserved / config | `>= 0x08120000` | read-only over DFU |
 
 ## Console-board bring-up (differs from the sensor board)
 
@@ -94,16 +94,20 @@ python py-tools/sign_firmware.py \
     --firmware    motion-console-fw.bin \
     --private-key <console ecdsa_private.pem> \
     --aes-key     <console aes128.bin> \
-    --version     <N> \
+    --version     <MAJOR.MINOR.PATCH> \
     --output      motion-console-fw_signed.bin
 ```
 
 The application must be linked to run at **`0x08020400`** (FLASH origin at the
 slot + 0x400 header offset, with VTOR relocated there).
 
-`--version` becomes the 16-bit `FwVersion` used by the monotonic anti-rollback
-floor: a unit that has booted version *N* refuses any image `< N` until
-re-flashed, so keep release versions increasing.
+`--version` accepts a dotted semver (`major` 0–31, `minor` 0–63, `patch` 0–31;
+`0.0.0` invalid). It is packed as `major[15:11] . minor[10:5] . patch[4:0]`
+into the signed header's 16-bit `FwVersion` field, which the monotonic
+anti-rollback floor uses: a unit that has booted version *N* refuses any image
+`< N` until re-flashed, so keep release versions increasing. See
+`py-tools/README.md` §"Firmware versioning & anti-rollback" for the full
+encoding table.
 
 ## Flashing
 
