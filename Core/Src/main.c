@@ -315,6 +315,17 @@ int main(void)
       }
     }
 
+    /* Host-requested reset (DNLOAD to the virtual reset address): the clean
+     * way for a host tool to leave DFU without flashing — e.g. the SDK
+     * aborting an update after its pre-flight downgrade check. SBSFU fully
+     * re-verifies the slot on the way back up, so if the slot is intact the
+     * application boots; if not, we simply return to DFU. */
+    if (DFU_ResetRequested() != 0U)
+    {
+      HAL_Delay(50);
+      NVIC_SystemReset();
+    }
+
     HAL_GPIO_TogglePin(IND1_GPIO_Port, IND1_Pin);
     HAL_Delay(500);
 

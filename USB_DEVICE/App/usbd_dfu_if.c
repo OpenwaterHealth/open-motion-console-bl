@@ -48,6 +48,10 @@ static volatile uint8_t s_dfu_image_written = 0U;
 static uint8_t  s_cur_ver_captured  = 0U;   /* 1 once s_current_fw_version is latched */
 static uint16_t s_current_fw_version = 0U;  /* installed FwVersion at DFU entry (the floor) */
 
+/* Set when the host writes to DFU_RESET_VIRT_ADDR (see MEM_If_Write_FS). The
+ * bootloader main loop polls DFU_ResetRequested() and performs the reset. */
+static volatile uint8_t s_dfu_reset_requested = 0U;
+
 /* USER CODE END PV */
 
 /** @addtogroup STM32_USB_OTG_DEVICE_LIBRARY
@@ -111,6 +115,16 @@ static uint16_t s_current_fw_version = 0U;  /* installed FwVersion at DFU entry 
  * This is a read-only query: nothing is written and no flash is touched. */
 #define DFU_VERSION_VIRT_ADDR   0xFFFFFF00U
 #define DFU_VERSION_READ_LEN    64U
+
+/* Virtual DFU DNLOAD address (outside flash). A host that points the DfuSe
+ * address pointer here and downloads any payload requests a device reset —
+ * the clean way to leave DFU mode without flashing (e.g. the SDK aborting an
+ * update after its pre-flight downgrade check). No flash is touched: the
+ * request is only latched here and the bootloader main loop performs the
+ * reset after the host's final GETSTATUS handshake completes. SBSFU fully
+ * re-verifies the slot on the way back up, so this can never launch an
+ * unverified image. */
+#define DFU_RESET_VIRT_ADDR     0xFFFFFF08U
 
 /* USER CODE END PRIVATE_DEFINES */
 
@@ -297,6 +311,15 @@ uint16_t MEM_If_Write_FS(uint8_t *src, uint8_t *dest, uint32_t Len)
   /* USER CODE BEGIN 3 */
 
   uint32_t addr = (uint32_t)dest;
+
+  /* Virtual reset request: latch and ACK without touching flash. The main
+   * loop resets after the host's status handshake completes. Deliberately
+   * does NOT set s_dfu_image_written — no image state changes here. */
+  if (addr == DFU_RESET_VIRT_ADDR)
+  {
+    s_dfu_reset_requested = 1U;
+    return (USBD_OK);
+  }
 
   /* Protect bootloader */
   if (addr < APP_FLASH_BASE || (addr + Len) > FLASH_END_ADDR)
@@ -528,6 +551,18 @@ void DFU_InvalidateImage(void)
 void DFU_ClearDownloadState(void)
 {
   s_dfu_image_written = 0U;
+}
+
+/**
+  * @brief  Reports whether the host requested a device reset via a DNLOAD to
+  *         DFU_RESET_VIRT_ADDR. Polled by the bootloader main loop, which
+  *         performs the actual NVIC_SystemReset (after a short delay so the
+  *         host's final USB status transaction completes).
+  * @retval 1 if a reset was requested, else 0.
+  */
+uint8_t DFU_ResetRequested(void)
+{
+  return s_dfu_reset_requested;
 }
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */

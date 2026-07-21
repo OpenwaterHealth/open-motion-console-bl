@@ -117,6 +117,11 @@ uint8_t DFU_IsRollback(void);
 void    DFU_InvalidateImage(void);
 void    DFU_ClearDownloadState(void);
 
+/* Returns 1 once the host has requested a device reset via a DNLOAD to the
+ * virtual reset address (0xFFFFFF08) — the clean host-side way to leave DFU
+ * without flashing. The main loop performs the actual reset. */
+uint8_t DFU_ResetRequested(void);
+
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**
