@@ -4,8 +4,8 @@
 **Manufacturer:** Openwater
 **Document type:** Premarket cybersecurity documentation
 **Status:** DRAFT — engineering input for 510(k) submission
-**Version:** 0.2
-**Date:** 2026-06-24
+**Version:** 0.3
+**Date:** 2026-10-06
 
 > **Scope & disclaimer.** This document provides the **engineering/technical** cybersecurity
 > content that supports a 510(k) premarket submission for the device's embedded
@@ -94,27 +94,36 @@ Defined in `Core/Inc/memory_map.h` (single source of truth):
 ```
 Addr range              Size   Sct   Region              Access control
 ---------------------------------------------------------------------------
-0x08000000-0x0801FFFF   128K   0     BOOTLOADER           read-only (immutable)
-0x08020000-0x0811FFFF  1024K   1-8   APP SLOT 1 (active)  updatable (signed) — DFU writable window
-0x08120000-0x081BFFFF   640K   9-13  RESERVED             read-only via DFU
-0x081C0000-0x081DFFFF   128K   14    ANTI-ROLLBACK FLOOR  read-only via DFU (bootloader-managed)
+0x08000000-0x0801FFFF   128K   0     BOOTLOADER           read-only (immutable; WRP + PCROP in Release)
+0x08020000-0x0809FFFF   512K   1-4   APP SLOT (active)    updatable (signed) — DFU writable window
+0x080A0000-0x080BFFFF   128K   5     ANTI-ROLLBACK FLOOR  read-only via DFU (bootloader-managed)
+0x080C0000-0x0819FFFF   896K   6-12  RESERVED             read-only via DFU
+0x081A0000-0x081DFFFF   256K   13-14 APPLICATION-OWNED    read-only via DFU (unused on the console)
 0x081E0000-0x081FFFFF   128K   15    USER CONFIG          read-only via DFU (application-managed)
 ```
 
+This is the layout shared with the sensor bootloader (`open-motion-sensor-bl`); the two bootloaders
+are one design kept identical in two repositories, differing only in the signing key. The 1.0.0
+console bootloader used the same 512 KB slot; an interim development layout with a 1024 KB slot and
+the floor in sector 14 was never released.
+
 The DFU update interface restricts erase/write to the **active application slot only**
-(`0x08020000`–`0x0811FFFF`, the SBSFU `SLOT_ACTIVE_1` extent in `Linker/mapping_fwimg.ld`). The DFU
+(`0x08020000`–`0x0809FFFF`, the SBSFU `SLOT_ACTIVE_1` extent in `Linker/mapping_fwimg.ld`). The DFU
 writable window is deliberately clamped to the slot so that **all DFU-writable flash is covered by
 secure-boot slot verification** (no writable region escapes the `VerifyActiveSlot` check). The
-bootloader sector (0), reserved sectors (9–13), the anti-rollback floor sector (14), and the
-user-config sector (15) are **not erasable or writable** through the firmware-update (DFU) interface.
-The anti-rollback floor sector is written only by the bootloader (during verified boot, see §5.6); the
-user-config sector is owned by the application.
+bootloader sector (0), the anti-rollback floor sector (5), the reserved and application-owned sectors
+(6–14) and the user-config sector (15) are **not erasable, writable or readable** through the
+firmware-update (DFU) interface. The anti-rollback floor sector is written only by the bootloader
+(during verified boot, see §5.6); the user-config sector is owned by the application.
 
 ### 2.4 Cryptographic scheme
 `SECBOOT_ECCDSA_WITH_AES128_CBC_SHA256`:
 - **Authenticity:** ECDSA P-256 signature over the firmware image header (public key in device).
 - **Integrity:** SHA-256 digest of the firmware binary, bound into the signed header.
-- **Confidentiality (transport):** AES-128-CBC for the firmware payload during distribution.
+- **Confidentiality:** none. The scheme name carries AES-128-CBC and the header has an IV field,
+  but the signing tool emits the firmware body in clear and the bootloader verifies SHA-256 of the
+  clear body; nothing is decrypted. Firmware images are public release assets. The AES key in the
+  Secure Engine key region is therefore unused (see AN-5).
 
 ---
 
@@ -168,9 +177,9 @@ Methodology: **STRIDE** over the data-flow and trust boundaries of the boot/upda
 | T-1 | Tampering | Attacker replaces/patches application firmware in flash. | Secure boot verifies ECDSA header signature + SHA-256 FW tag every boot; rejects on mismatch. | C-1, C-2 |
 | T-2 | Spoofing | Attacker installs forged firmware via DFU. | DFU image must carry a valid ECDSA signature over the header; unauthenticated images are not executed. | C-1, C-4 |
 | T-3 | Tampering | Attacker modifies the bootloader or keys. | Bootloader + SECoreBin in read-only sector 0; (production) Flash WRP/RDP/PCROP and SE MPU isolation. | C-3, C-7 |
-| T-4 | Information disclosure | Firmware IP extracted in transit. | AES-128-CBC encryption of the distributed payload. | C-5 |
+| T-4 | Information disclosure | Firmware IP extracted in transit. | Not mitigated: firmware images are distributed in clear as public release assets (the AES-128-CBC part of the scheme is not used, §2.4). Accepted: the images contain no keys or patient data; integrity and authenticity are covered by T-1/T-2. | C-5 (withdrawn) |
 | T-5 | Information disclosure | Keys/firmware read out via debug port. | (Production) RDP Level ≥ 1, DAP disable, PCROP on key region; SE call-gate isolation. | C-7 |
-| T-6 | Denial of service | Corrupt/partial update bricks the device. | Update is verified before execution; invalid slot → safe recovery (DFU re-entry), never executes bad code. | C-2, C-6 |
+| T-6 | Denial of service | Corrupt/partial update bricks the device. | The signed header is checked **before** the installed image is erased (§5.4), so a corrupt, forged or downgraded file is refused with the working firmware intact; an image that passes the header check but fails verification at boot is invalidated and the device returns to USB DFU, where a signed image installs without a debug probe. A hung application is caught by the watchdog and boot-failure counter. **Verified on the bench, all cases (§8.4).** | C-2, C-6 |
 | T-7 | Tampering | "Additional code beyond firmware" hidden in slot. | Bootloader verifies the unused slot region is empty before launch. | C-2 |
 | T-8 | Elevation of privilege | Application calls protected Secure Engine services illegitimately. | SE call-gate validates caller region; (production) MPU privilege isolation. | C-7 |
 | T-9 | Tampering | Rollback to a known-vulnerable signed firmware. | Signed-header firmware version (`FwVersion`) + **boot-time anti-rollback**: the bootloader refuses to launch any image whose verified version is below a persistent monotonic floor, and invalidates the downgrade so it cannot boot (§5.6). **Implemented & verified on STM32H743 target.** | C-8 |
@@ -225,10 +234,35 @@ the Secure Engine, then:
 - Update images are produced by the controlled signing tool (`sign_firmware.py`): a 320-byte header
   (magic, version, sizes, SHA-256 FW tag, IV, **ECDSA-P256 signature**, image state, previous-header
   fingerprint) followed by the firmware body at the slot execution offset.
-- The device exposes a **USB DFU** interface only when no valid firmware is present (or upon an
-  authenticated in-application request — see §9). The DFU interface restricts writes/erases to the
-  application slots; the bootloader sector and user-config sector are rejected.
-- After download the device resets and re-runs full verification before executing the new image.
+- The device exposes a **USB DFU** interface only when no valid firmware is present, when the
+  application requests it (RTC backup-register magic, consumed on the next boot), or after the
+  boot-failure counter reaches its limit (§5.4.1). The DFU interface restricts writes/erases to the
+  application slot; the bootloader sector, floor sector and user-config sector are rejected, and reads
+  outside the slot return zeros.
+- **Pre-erase header check.** There is a single application slot, so a download must erase the
+  installed image before the new one is complete. To keep a bad file from costing the device its
+  working firmware, the bootloader defers every erase request until the first block of the download
+  (the signed header at the slot start) has been received and checked: `SFU1` magic, ECDSA
+  signature over the header (verified inside the Secure Engine), `FwVersion` not below the installed
+  version, and `FwSize` within the slot. Only then is the header's sector erased and programming
+  starts; each further sector is erased when its first block arrives. A header that fails any check
+  fails the download with a DFU vendor error and nothing has been erased. The host-side tools
+  (`py-tools/verify_firmware.py`, used by `flash_firmware.py` and to be adopted by the SDK) run the
+  same checks on the file before connecting, so the operator sees the reason without a device
+  round-trip.
+- After download the device erases any slot sector above the new image that still holds data from a
+  larger previous image, resets, and re-runs full verification before executing the new image. An
+  image that passes the header check but fails the body hash or slot check at boot is invalidated
+  (body zeroed, header kept for the version record) and the device enters DFU.
+
+#### 5.4.1 Recovery paths (no debug probe)
+| Situation | Bootloader behaviour | Operator action |
+|---|---|---|
+| File refused by the pre-erase header check | Installed firmware untouched; device stays in DFU | Send a valid image, or `leave` to boot the installed firmware |
+| Image rejected at boot (bad body hash, extra data in slot, below floor) | Image invalidated; device enters DFU | Send a valid signed image |
+| Download interrupted (after erase or mid-write) | Partial image rejected at next boot; device enters DFU | Send a valid signed image |
+| Application hangs or crash-loops | IWDG (armed by the bootloader before launch) resets the device; the boot-failure counter in `RTC->BKP6R` increments per attempt and after 3 attempts the bootloader enters DFU with the image left in place | Send a signed image (the erase clears the counter) or power-cycle |
+| Application requests an update | `RTC->BKP7R` magic → DFU with the image intact | Send a signed image or `leave` |
 
 ### 5.5 Cryptographic design
 See Appendix B. Public ECDSA key and symmetric key are embedded in the Secure Engine binary at
@@ -275,7 +309,7 @@ rejected downgrade results in safe DFU recovery rather than execution of vulnera
 | C-2 | SHA-256 integrity + empty-slot check | SO-2, T-1/T-6/T-7 | §8 TC-INTEG-* |
 | C-3 | Immutable bootloader/SE in read-only sector 0 | SO-4, T-3 | §8 TC-IMMUT-* |
 | C-4 | DFU restricted to app slots; signed-only install | SO-6, T-2 | §8 TC-DFU-* |
-| C-5 | AES-128-CBC transport confidentiality | SO-3, T-4 | §8 TC-CONF-* |
+| C-5 | AES-128-CBC transport confidentiality — **withdrawn**: not implemented (images in clear, §2.4) | SO-3, T-4 | — |
 | C-6 | Fail-closed verification; safe recovery on invalid FW | SO-5, T-6 | §8 TC-FAILCLOSED-* |
 | C-7 | Hardware protections: RDP, WRP, PCROP, DAP, MPU/SE isolation | SO-4, T-3/T-5/T-8 | §8 TC-HWPROT-* / §12 |
 | C-8 | Signed `FwVersion` + boot-time monotonic anti-rollback floor (§5.6) | SO-5, T-9 | §8 TC-ROLLBACK-* |
@@ -331,11 +365,49 @@ vulnerability testing, and penetration testing.
 | TC-USERCFG-01 | DFU write/erase of user-config rejected | Target 0x081E0000 | **Pass** ("Last page … not writeable") |
 | TC-FAILCLOSED-01 | No/invalid FW → safe recovery, no code exec | Empty slot | **Pass** (enters DFU; no unauthenticated execution) |
 | TC-IMMUT-01 | Bootloader not modifiable via update path | SHA-256 of bootloader sector 0 (0x08000000, 128 KB) before/after a DFU write attempt to 0x08000000 | **Pass** (STM32H743): write rejected (`Last page … not writeable`); sector-0 hash identical before and after (`65b0bf97…256edd6`) — bootloader unchanged |
-| TC-HWPROT-01 | RDP/WRP/PCROP/DAP effective | Read/modify attempts via SWD | `[[TODO: production build]]` |
+| TC-HWPROT-01 | RDP/WRP/PCROP/DAP effective | Flash the Release (protections-on) build over SWD, reset, read option bytes; attempt a probe connection with the application running; attempt a DFU read of sector 0 | **Pass** (STM32H743, console, 2026-10-06, build `1fd5b58`): first boot programmed `RDP 0x55` (level 1), `nWRP0 = 0` (sector 0 write-protected), `PROT_AREA1 0x08000600–0x080008FF` with `DMEP1 = 1`; with the app running the ST-Link reports "Unable to get core ID / No STM32 target found" (DAP lock); DFU read of `0x08000000` returns zeros. Same result on the right sensor with the sensor build. Level 2 not applied (T2 decision pending). |
+| TC-DFU-04 | Tampered header refused before erase | Flip one byte in the signed header region; send through DFU with the host check bypassed (`--allow-unverified`) | **Pass**: device answers `errVENDOR`, slot header and body read back unchanged, installed app boots on `leave`. Verified at RDP 0 and RDP 1, console and sensor |
+| TC-DFU-05 | Wrong-key header refused before erase | Re-sign the released body with a freshly generated P-256 key; send through DFU | **Pass**: as TC-DFU-04 |
+| TC-DFU-06 | Downgrade refused before erase | With 10802 installed, send the released 10801 image | **Pass**: host tool refuses ("older than the installed 10802", nothing sent); forced past the host check the device refuses at the header, slot intact, app boots on `leave` |
+| TC-DFU-07 | Valid images install | Released 1.8.1 (1 sector) and 1.8.2-dev.4 (2 sectors) on the console; 1.8.2 (3 sectors) on the sensor; dfu-util-compatible sequence (erase requests then blocks) | **Pass**: 10.7 s / 12.4 s / 24 s; app boots and reports the version over the SDK |
+| TC-DFU-08 | Out-of-window DFU read refused | UPLOAD from `0x08000000` | **Pass**: zeros returned (see AN-2 for the earlier behaviour) |
 | TC-ROLLBACK-01 | Older version rejected (boot-time floor) | Boot v1.8.0 (floor→10800); flash v1.7.0 (10700) to slot via SWD (floor sector untouched); reset | **Pass** (STM32H743): `ANTI-ROLLBACK: FW version 10700 below floor 10800 - launch refused`; image invalidated; enters DFU; not executed |
 | TC-ROLLBACK-02 | Equal/higher version accepted, floor raised | Flash v1.9.0 (10900); reset | **Pass** (boots; floor raised to 10900) |
 | TC-ROLLBACK-03 | Floor persists across app-slot reflash / SWD | Reflash app slot only (not floor sector); verify floor retained | **Pass** (floor 10800 read back on the TC-ROLLBACK-01 downgrade boot) |
 | TC-ROLLBACK-04 | Floor sector not erasable via DFU | Target 0x081C0000 over DFU | **Pass** (outside DFU writable window; erase/write rejected) |
+
+### 8.4 Recovery after a rejected image (threat T-6, issue #7)
+
+Objective: after any rejected, corrupted or interrupted update the console returns to USB DFU and
+accepts a signed image **without a debug probe**, and none of these paths can modify the bootloader
+sector. Bench console `WWWA4Q40003C`, 2026-10-06. "Forced" means the host-side check was bypassed
+with `--allow-unverified` so that the device-side behaviour is what is being observed. DFU entry and
+exit were done over USB only (SDK `enter_dfu`, `flash_firmware.py leave`); the ST-Link was attached
+for state read-back during the development-build runs and absent for the protected-build runs.
+
+| Case (from issue #7) | How it was induced | Observed | DFU (`0483:DF11`) | Recovered over USB |
+|---|---|---|---|---|
+| Bad signature (header tampered) | Header byte flipped, forced through DFU | Refused before erase; installed image intact | Yes (still in DFU) | `leave` boots the installed app |
+| Bad signature (wrong key) | Body re-signed with a throwaway key, forced | Refused before erase; image intact | Yes | `leave` boots the installed app |
+| Failed SHA-256 integrity check | One body bit flipped under a valid header, forced; also written directly over SWD to reproduce PTR-2026-1-5 CON-05 | Accepted by DFU, rejected at boot: body zeroed, header kept | Yes, 6 s after reset | Signed 1.8.1 installed, app back in 5 s |
+| Version below the anti-rollback floor | Slot empty, floor 10802, 10801 sent | Installed, refused at boot (`ANTI-ROLLBACK`), image erased | Yes | 1.8.2-dev.4 installed, app boots |
+| Downgrade with an image installed | 10801 sent over installed 10802 | Refused before erase (TC-DFU-06); on the 1.0.0 bootloader the same case erased the working image first (AN-3) | Yes | `leave` |
+| Partial write, after erase | Flasher killed 4.5 s in (sector erased, nothing written), reset | Empty slot | Yes | Signed image installed |
+| Partial write, mid-image | Flasher killed 5.6 s in (6 KB written), reset | Partial image rejected at boot, body zeroed | Yes | Signed image installed |
+| Boot-failure counter at limit | `RTC->BKP6R` set to 3, reset | Bootloader skipped the launch, image left intact; a plain reset stays in DFU | Yes | Signed image installed (erase clears the counter); app clears it to 0 on boot |
+| Hung application → watchdog | Not inducible without a signed hanging image | — | — | The bootloader arms IWDG1 (~8 s) before every launch and increments the counter first; the application refreshes the watchdog and clears the counter (`openmotion-console-fw` `main.c:217`). Counter threshold behaviour verified above; the watchdog-reset leg **needs a CI-signed test image** (`[[TODO]]`) |
+| Bootloader sector after every case | Sector 0 compared against the backup after each run | Unchanged in every case; with protections on, sector 0 is additionally write-protected and DFU erase/write of it is refused (TC-DFU-02, TC-IMMUT-01) | — | — |
+
+All cases were repeated on the right sensor (`open-motion-sensor-bl` build `cb2a9fa`, same source)
+except the floor and boot-counter cases, with identical outcomes. The protected-build runs (RDP 1)
+covered: tampered header, wrong key, body-corrupt image rejected at boot and recovered, and a signed
+update, on both the console and the sensor.
+
+Residual risk recorded for T-6: a host with USB access can still put the device into DFU and erase
+the application (the DFU erase itself is not authenticated), leaving the device without an
+application until a signed image is installed. No data or keys are exposed and the device cannot be
+made to run unsigned code; this is the denial-of-service residual noted by PTR-2026-1-5 CON-05 and is
+addressed at the physical/debug-port level (RDP level 2, T2).
 
 ### 8.2 Vulnerability testing
 `[[TODO: known-vulnerability scan of SBOM components against NVD/ICS-CERT; static analysis
@@ -343,8 +415,15 @@ vulnerability testing, and penetration testing.
 dev-mode protection reminders); fuzzing of the DFU/header parser.]]`
 
 ### 8.3 Penetration testing
-`[[TODO: independent penetration test of the boot/update subsystem — fault injection, debug-port
-attacks, signature-bypass attempts, update-path abuse. Provide report and remediation.]]`
+Independent penetration test PTR-2026-1-5 (Fava Development LLC, 2026-09-22 to 2026-10-06, black-box
+then white-box). Console checkpoints: CON-01 tamper evidence (warning, enclosure), CON-02 debug
+interface access control (warning), CON-03 firmware read-protected (**failed**, RDP level 0),
+CON-04 illicit modification detected (passed), CON-05 resilience against denial of service
+(**failed**: adulterated image via SWD left the device unusable). Remediation in this document:
+CON-02/CON-03 by the Release-preset protections (§12, TC-HWPROT-01); CON-05 by the pre-erase header
+check and the verified USB recovery path (§8.4; the tester's "until a service technician restores the
+firmware" is corrected to "until a signed image is sent over USB"), with the SWD vector closed by RDP.
+`[[TODO: retest against the 1.2.0 release build; attach the report and the retest to the DHF.]]`
 
 ---
 
@@ -380,28 +459,40 @@ Per FDA labeling expectations, provide to users/operators: `[[TODO: Regulatory t
 
 | ID | Anomaly | Risk assessment | Disposition |
 |----|---------|-----------------|-------------|
-| AN-1 | The DFU writable window (`0x08020000`–`0x081BFFFF`) was larger than the verified active slot (`0x08020000`–`0x0809FFFF`, `mapping_fwimg.ld`), so DFU could write flash *outside* the slot. | **Low** (never a verification bypass; out-of-slot content is not authenticated/executed). | **RESOLVED.** The DFU writable window is clamped to the active-slot end (`FLASH_END_ADDR = 0x08120000`, DfuSe descriptor `01*128Ka,08*128Kg,07*128Ka`); writes outside the slot are now rejected (verified: TC-DFU-03). All DFU-writable flash is covered by slot verification. |
+| AN-1 | The DFU writable window (`0x08020000`–`0x081BFFFF`) was larger than the verified active slot (`0x08020000`–`0x0809FFFF`, `mapping_fwimg.ld`), so DFU could write flash *outside* the slot. | **Low** (never a verification bypass; out-of-slot content is not authenticated/executed). | **RESOLVED.** The DFU writable window is clamped to the active-slot end (`FLASH_END_ADDR = 0x080A0000`, DfuSe descriptor `01*128Ka,04*128Kg,11*128Ka`); writes outside the slot are rejected (verified: TC-DFU-03). All DFU-writable flash is covered by slot verification. |
+| AN-2 | A refused out-of-window DFU UPLOAD returned `NULL` to the USB DFU class, which stores an error *status* code in its state variable; the device then STALLed every request until power-cycled. | **Low** (only reachable by a host reading outside the slot; no data exposed; recovers on power cycle). | **RESOLVED** (`1fd5b58`): refused reads return zeros; DFU state machine unaffected (TC-DFU-08). Upstream behaviour of `usbd_dfu.c` v2.11.6 noted in the SOUP record. |
+| AN-3 | Bootloader 1.0.0 checked for a downgrade only after the download had erased the installed image, and refused a tampered or wrong-key image only at the next boot; a bad file therefore cost the device its working firmware before it was refused (PTR-2026-1-5 CON-05 premise). | **Medium** (denial of service via the legitimate update path; recoverable over USB). | **RESOLVED** (`1fd5b58`): pre-erase header check (§5.4) refuses the download with the installed image intact (TC-DFU-04/05/06, §8.4). |
+| AN-4 | The development copy of `sign_firmware.py` encoded a dotted `--version` as bit fields (5/6/5), while every released image is encoded as `major*10000 + minor*100 + patch` by the firmware workflows; an image signed by hand would have compared below the fielded floor and been refused as a downgrade. CI was unaffected (it passes the raw integer). | **Low** (tooling only; no fielded impact). | **RESOLVED** (`1fd5b58`): decimal encoding restored and documented as fixed (`py-tools/README.md`); `verify_firmware.py` shows both forms. |
+| AN-5 | `openmotion-bl.bin` from this repository's CI is attached to public GitHub releases and contains the Secure Engine key region, including the AES-128 key. | **Low** today: images are stored in clear and authenticated by ECDSA signature, so the AES key protects nothing; the ECDSA key is public by design. Becomes **High** if AES confidentiality is ever relied on. | **OPEN.** Record in the CVA; before any use of AES in the scheme, rotate the key and stop publishing the bootloader binary. `[[TODO: CVA entry]]` |
 
 ---
 
 ## 12. Production hardening requirements (CRITICAL)
 
-> The development configuration disables the STM32 hardware security IP for debuggability
-> (`SECBOOT_DISABLE_SECURITY_IPS`), which the build surfaces as intentional `#warning
-> "SFU_*_PROTECT_DISABLED"` reminders. **A device shipped for clinical use MUST be built and
-> provisioned with these protections ENABLED.** This is a release gate.
+> The protections are selected by the CMake preset (`SBSFU_ENABLE_PROTECTIONS`): the `Debug` preset
+> disables the STM32 hardware security IP for debuggability (`SECBOOT_DISABLE_SECURITY_IPS`, surfaced
+> as `#warning "SFU_*_PROTECT_DISABLED"`); the `Release` preset, which CI builds for every rc and
+> production tag, enables them and the bootloader programs the option bytes itself on its first boot.
+> **A device shipped for clinical use MUST run a Release build, and the final lock (RDP level 2) MUST
+> be applied as a deliberate manufacturing step after final test.** This is a release gate.
 
-| Protection | Dev state | Production requirement |
-|------------|-----------|------------------------|
-| RDP (readout protection) | Off | **RDP Level ≥ 1** (Level 2 disables debug permanently — irreversible) |
-| WRP (write protection) | Off | **WRP on bootloader + SE sectors** (immutability) |
-| PCROP (code readout protection) | Off | **PCROP on key/SE region** |
-| DAP / debug access | Open | **Disabled** in production |
-| MPU / SE isolation | Off | **Enabled** (`SFU_MPU_PROTECT_ENABLE`) |
-| IWDG watchdog | Off | **Enabled** |
-| Secure user memory (HDP) | Off | **Enabled** if required by risk assessment |
+| Protection | Debug preset | Release preset (verified, TC-HWPROT-01) | Production end state |
+|------------|--------------|------------------------------------------|----------------------|
+| RDP (readout protection) | Off | **Level 1**, applied at first boot | **Level 2** via `SFU_FINAL_SECURE_LOCK_ENABLE` (irreversible: disables debug, option-byte changes and the ROM bootloader) — decision T2 |
+| WRP (write protection) | Off | **Sector 0** (bootloader + SE) | Same |
+| PCROP (code readout protection) | Off | **SE key region `0x08000600–0x080008FF`**, erased on regression | Same |
+| DAP / debug access | Open | **Disabled** at boot (SWD pins reconfigured); probe cannot connect | Same |
+| DMA protection | Off | Enabled | Same |
+| MPU / SE isolation | Off | **Off by design**: the application runs privileged, so MPU isolation gives no confidentiality; the SE key RAM is zeroized before the application or DFU runs instead (`SFU_WIPE_SE_RAM_ON_EXIT`) | Same; revisit only if the application becomes unprivileged-safe |
+| IWDG watchdog | Armed by the bootloader before every application launch (`main.c`), not by SBSFU's `SFU_IWDG_PROTECT_ENABLE` | Same | Same |
+| Secure user memory (HDP) | Off | Off | Only with RDP level 2 (`SFU_SECURE_USER_PROTECT_ENABLE`), per risk assessment |
 
-`[[TODO: Manufacturing — document the Option Byte provisioning step and verification at production
+Service note: a unit at RDP level 1 can be returned to a blank, unprotected chip, but only through
+the ROM bootloader (BOOT0), in normal connect mode, with the PCROP removal written in the same
+option-byte operation as the RDP regression; see `BENCH-ERASE-PROTECTED-UNIT.md` in the workspace
+root. At RDP level 2 no recovery exists.
+
+`[[TODO: Manufacturing — document the final-lock (RDP level 2) step and its verification at production
 test, and confirm keys are unique-per-product or per-product-family per the security risk assessment.]]`
 
 ---
