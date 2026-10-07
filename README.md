@@ -113,7 +113,9 @@ encoding table.
 
 - **Bootloader** (ST-Link / OpenOCD): program `build/Release/openmotion-bl.hex`
   at `0x08000000` (with verify).
-- **Signed app** (USB DFU): `dfu-util -a 0 -s 0x08020000 -D motion-console-fw_signed.bin`.
+- **Signed app** (USB DFU): `python py-tools/flash_firmware.py motion-console-fw_signed.bin`
+  (verifies the image on the host, then writes it to `0x08020000`; `dfu-util`
+  and the STM32CubeProgrammer CLI are not used).
 - **Production image:** bootloader + signed app merged into a single image and
   flashed at `0x08000000` (see the `openmotion-console-fw` CI, which bundles a
   pinned release of this bootloader with the signed app).
