@@ -165,7 +165,7 @@ python py-tools/sign_firmware.py \
 | `--firmware` | *(required)* | Raw `.bin` built for `0x08020400` (step 5) |
 | `--private-key` | `py-tools/keys/ecdsa_private.pem` | ECDSA P-256 private key |
 | `--aes-key` | `py-tools/keys/aes128.bin` | Raw 16-byte AES-128 key |
-| `--version` | `0.0.1` | Firmware version, dotted semver `MAJOR.MINOR.PATCH` (a raw uint16 is also accepted) — see [Firmware versioning & anti-rollback](#firmware-versioning--anti-rollback) |
+| `--version` | `0.0.1` | Firmware version, dotted semver `MAJOR.MINOR.PATCH`, encoded as `major*10000 + minor*100 + patch` (a raw uint16 is also accepted) — see [Firmware versioning & anti-rollback](#firmware-versioning--anti-rollback) |
 | `--output` | `<firmware>_signed.bin` | Output path |
 
 ### Signed-image layout (what gets flashed to the slot)
@@ -189,49 +189,39 @@ The signed header carries a **16-bit `FwVersion`** (offset `0x006`, inside the
 ECDSA-signed region). `--version` sets it; because it is signed, it cannot be
 altered without re-signing.
 
-**Encoding — packed semver (`major[15:11] . minor[10:5] . patch[4:0]`).**
-`sign_firmware.py` packs a dotted `MAJOR.MINOR.PATCH` argument into the 16-bit
-field as:
+**Encoding — decimal (`FwVersion = major*10000 + minor*100 + patch`).**
+`sign_firmware.py` encodes a dotted `MAJOR.MINOR.PATCH` argument as a plain
+decimal number, the same scheme the firmware release workflows use:
 
-```
-FwVersion = (major << 11) | (minor << 5) | patch
-```
+| Semver | `--version` | FwVersion |
+|--------|-------------|-----------|
+| 0.0.1  | `0.0.1` | 1 |
+| 1.0.0  | `1.0.0` | 10000 |
+| 1.8.1  | `1.8.1` | 10801 (`0x2A31`) |
+| 1.8.2  | `1.8.2` | 10802 (`0x2A32`) |
+| 6.55.35 | `6.55.35` | 65535 (`0xFFFF`, the maximum) |
 
-| Field | Bits | Range |
-|-------|------|-------|
-| major | `[15:11]` (5) | 0–31 |
-| minor | `[10:5]`  (6) | 0–63 |
-| patch | `[4:0]`   (5) | 0–31 |
+`minor` and `patch` are limited to 0–99, so the integer orders exactly like
+`(major, minor, patch)` and the bootloader's anti-rollback compare is a plain
+unsigned `<`. The 16-bit field caps the range at `6.55.35`. **`0.0.0` is
+invalid** (encodes to `0`, which SBSFU reserves for "no firmware"); the minimum
+valid release is `0.0.1`. Pre-release suffixes are **not** encoded —
+`1.8.2-rc.1`, `1.8.2-dev.4` and `1.8.2` all map to `10802`.
 
-Max encodable version is `31.63.31` = `0xFFFF`. **`0.0.0` is invalid** (packs to
-`0`, which SBSFU reserves for "no firmware"); the minimum valid release is
-`0.0.1`. Pre-release suffixes are **not** encoded — `1.8.0-rc.1`, `1.8.0-dev.2`
-and `1.8.0` all map to the same integer.
-
-| Semver | `--version` | Packed |
-|--------|-------------|--------|
-| 0.0.1  | `0.0.1` | `0x0001` (1) |
-| 1.0.0  | `1.0.0` | `0x0800` (2048) |
-| 1.8.0  | `1.8.0` | `0x0900` (2304) |
-| 1.9.3  | `1.9.3` | `0x0923` (2339) |
-| 2.0.0  | `2.0.0` | `0x1000` (4096) |
-| 31.63.31 | `31.63.31` | `0xFFFF` (65535) |
-
-Because each field occupies a contiguous non-overlapping bit range sized to its
-max value, the packed integer is **strictly monotonic** with `(major, minor,
-patch)` ordering — so the bootloader's anti-rollback compare is a plain
-unsigned `<` and needs no knowledge of the scheme.
+> **Do not change this encoding.** Fielded units store their anti-rollback floor
+> in it; an image signed under any other scheme compares below the floor and is
+> refused as a downgrade (the bootloader then erases it). Changing it is a
+> coordinated image-format change (see rule 8 in the repository `CLAUDE.md`).
 
 The release/CI build passes the git tag directly:
 
 ```sh
-VER="${TAG%%-*}"                          # 1.8.0-rc.1 -> 1.8.0
+VER="${TAG%%-*}"                          # 1.8.2-rc.1 -> 1.8.2
 python py-tools/sign_firmware.py --firmware app.bin --version "$VER" --output app_signed.bin
 ```
 
 > A raw integer (decimal or `0x`-prefixed hex) in `1..65535` is also accepted
 > by `--version` for advanced use.
-
 **Anti-rollback (downgrade protection).** The bootloader keeps a persistent,
 monotonic **version floor** — the highest `FwVersion` it has ever launched —
 stored in a flash sector that the DFU update path cannot erase. After verifying
@@ -264,6 +254,24 @@ re-enter DFU on a programmed device, erase the slot header and reset, or just
 flash a new image which replaces the old one). The image is written to
 `0x08020000`; the device then resets, verifies the signature, and boots the app.
 
+### Check the image first
+
+There is one application slot, so a download erases the installed firmware
+before the bootloader has verified the new one. An image it rejects at boot
+leaves the device in DFU mode with no application until a good image is
+flashed. Run the same checks on the file beforehand, while the installed
+firmware is still intact:
+
+```sh
+python py-tools/verify_firmware.py your_app_signed.bin
+python py-tools/verify_firmware.py your_app_signed.bin --min-version 1.8.1   # also refuse a downgrade
+```
+
+It needs only the public key (`keys/ecdsa_public.pem` by default; pass
+`--public-key` for a bootloader built with local test keys) and checks the
+header signature, `FwTag`, size and trailing data. Option B below runs it
+automatically; with Option A (dfu-util) run it by hand first.
+
 ### Option A — dfu-util
 
 ```sh
@@ -288,6 +296,11 @@ python py-tools/flash_firmware.py leave                # reset device into the a
 auto-detects the device's DFU transfer size, erases the affected slot sector(s),
 writes the image to `0x08020000`, and resets — the equivalent of the dfu-util
 command above.
+
+Before erasing anything it verifies the image (see "Check the image first") and
+reads the installed version from the slot header, and stops if the image would
+be rejected or is a downgrade. `--allow-unverified` skips this for bench
+negative-path tests only; the bootloader's own verification is unaffected.
 
 > **Windows / pyusb driver:** the "STM32 BOOTLOADER" device must be bound to a
 > WinUSB/libusb driver (use [Zadig](https://zadig.akeo.ie/)), or `stm32dfu.py`
@@ -346,17 +359,22 @@ Addr range              Size   Sct   Region            DFU access
   0x08000000  ISR vectors
   0x08000400  SE CallGate + SECoreBin
   0x08008A00  SBSFU code
-0x08020000-0x0811FFFF  1024K   1-8   APP SLOT 1 (active) read/erase/write
+0x08020000-0x0809FFFF   512K   1-4   APP SLOT (active)   read/erase/write
   0x08020000    └ signed header (0x400)
   0x08020400    └ application firmware (execution address)
-0x08120000-0x081DFFFF   768K   9-14  RESERVED (future)   read/erase/write
+0x080A0000-0x080BFFFF   128K   5     ANTI-ROLLBACK FLOOR read-only
+0x080C0000-0x0819FFFF   896K   6-12  RESERVED (future)   read-only
+0x081A0000-0x081DFFFF   256K   13-14 APPLICATION-OWNED   read-only
 0x081E0000-0x081FFFFF   128K   15    USER CONFIG         read-only
 0x08200000  End of flash
 ```
 
-> The bootloader sector and the USER CONFIG sector cannot be erased or written
-> over DFU (the bootloader may still *read* user config). This is a single-slot
-> configuration; the bootloader boots SLOT 1.
+> Only the APP SLOT can be erased or written over DFU; everything else is
+> read-only through that path (the bootloader may still *read* user config).
+> There is no second slot — SBSFU is single-image and dual-slot / A-B updating
+> was deliberately removed so all openmotion bootloaders share one layout.
+> APPLICATION-OWNED is written by the application, never the bootloader; on the
+> sensor it holds the camera FPGA bitstream. See `Core/Inc/memory_map.h`.
 
 ---
 
@@ -367,6 +385,7 @@ py-tools/
   generate_keys.py     Generate ECC P-256 + AES-128 keys, update se_key.s
   gen_se_key_s.py      Low-level: raw key bytes -> ARM MOVW/MOVT asm
   sign_firmware.py     Sign + format an application image for the active slot
+  verify_firmware.py   Check a signed image on the host before flashing it
   flash_firmware.py    Pure-Python USB DFU installer (uses stm32dfu.py)
   stm32dfu.py          Pure-Python STM32 DfuSe protocol (pyusb)
   requirements.txt     cryptography, pyusb
