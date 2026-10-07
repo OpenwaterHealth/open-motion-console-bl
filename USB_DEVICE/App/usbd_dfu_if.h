@@ -122,6 +122,11 @@ void    DFU_ClearDownloadState(void);
  * without flashing. The main loop performs the actual reset. */
 uint8_t DFU_ResetRequested(void);
 
+/* After a completed download: erase any slot sector beyond the new image that
+ * still holds code from a larger previous image, so SBSFU's "nothing beyond the
+ * image" check (VerifySlot) passes. Call from the main loop before the reboot. */
+void DFU_CleanSlotTail(void);
+
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**
