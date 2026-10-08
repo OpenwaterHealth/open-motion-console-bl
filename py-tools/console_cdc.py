@@ -141,7 +141,13 @@ class ConsoleCdc:
         rsp = self.command(OW_CMD_VERSION)
         if rsp["type"] == OW_ERROR:
             raise ConsoleError("version command refused")
-        d = rsp["data"]
+        d = rsp["data"].split(b"\x00", 1)[0]
+        try:
+            txt = d.decode("ascii")
+            if txt and all(32 <= ord(c) < 127 for c in txt):
+                return txt.strip()                      # firmware replies with a string, e.g. "1.8.1"
+        except UnicodeDecodeError:
+            pass
         return ".".join(str(b) for b in d[:3]) if len(d) >= 3 else d.hex()
 
     def enter_dfu(self) -> bool:

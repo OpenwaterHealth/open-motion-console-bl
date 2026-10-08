@@ -248,7 +248,13 @@ def cmd_migrate(args):
                 raise SystemExit(f"Error: bootloader reports {ver_str!r}, not 1.2.x. The updater did not replace "
                                  "sector 0 (it refuses when option bytes are not RDP0/no WRP/no PCROP). "
                                  "Check UART4 output; the unit is still usable with old-key images.")
-            dfu.download(SLOT_ADDR, signed, progress_cb=_progress)
+            try:
+                dfu.download(SLOT_ADDR, signed, progress_cb=_progress)
+            except DFUError as e:
+                raise SystemExit(f"Error: the bootloader refused the download: {e}. "
+                                 "Its DFU checks the signed header before writing: wrong key, or FwVersion "
+                                 "below the header still in the slot. An updater older than the self-erasing "
+                                 "build leaves its 1.8.99 header there; the slot must then be cleared on the bench.")
             _say("  downloaded; the bootloader verifies the image and launches it.")
 
     _say(f"\nWaiting for the console application (up to {T_APP_APPEAR:.0f}s)...")
