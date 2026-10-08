@@ -422,7 +422,9 @@ sector 0, if the option bytes are not in the 1.0.0 state (RDP 0, no WRP, no PCRO
 then comes back in the old bootloader's DFU.
 
 `python flash_firmware.py enter-dfu` alone puts a running console into DFU and prints the
-bootloader version and DFU flavour. Windows needs the WinUSB driver (Zadig) on the DFU
+bootloader version and DFU flavour. The same tooling serves the sensor module (bulk-USB
+command channel, `--product sensor`, `--app-serial` to pick one of several); the sensor
+bootloader repository carries an identical copy with its own legacy key. Windows needs the WinUSB driver (Zadig) on the DFU
 device; the CDC port uses the inbox usbser driver. Design: `PLAN-console-migration.md`;
 updater source: `open-motion-console-bl-updater`.
 
