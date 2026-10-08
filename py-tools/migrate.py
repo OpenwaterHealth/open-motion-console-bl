@@ -29,9 +29,73 @@ sys.path.insert(0, os.path.dirname(__file__))
 from stm32dfu import STM32DFU, DFUError                      # noqa: E402
 from verify_firmware import ImageVerificationError, verify_image, DEFAULT_PUBLIC_KEY  # noqa: E402
 import console_cdc                                           # noqa: E402
+import sensor_usb                                            # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_LEGACY_PUBLIC_KEY = os.path.join(HERE, "keys", "ecdsa_public_legacy_1.0.0.pem")
+
+
+def _default_legacy_key():
+    """keys/ecdsa_public_legacy_<fielded bootloader tag>.pem of this repository (console
+    1.0.0 or sensor 1.1.0); the file name records which bootloader trusted it."""
+    import glob
+    cands = sorted(glob.glob(os.path.join(HERE, "keys", "ecdsa_public_legacy*.pem")))
+    return cands[-1] if cands else os.path.join(HERE, "keys", "ecdsa_public_legacy.pem")
+
+
+DEFAULT_LEGACY_PUBLIC_KEY = _default_legacy_key()
+
+
+# ---- application-side device (console: CDC serial port; sensor: bulk USB) ---------------
+
+def _find_app(product, port=None, serial=None):
+    """Return (kind, handle) for the one running application on the bus, or (None, None)."""
+    if product in ("auto", "console"):
+        ports = [port] if port else console_cdc.find_console_ports()
+        if ports:
+            return "console", ports[0]
+    if product in ("auto", "sensor"):
+        devs = sensor_usb.find_sensor_devices()
+        if serial:
+            devs = [d for d in devs if d[0] == serial]
+        if devs:
+            return "sensor", devs[0][0]
+    return None, None
+
+
+def _app_enter_dfu(product, port=None, serial=None):
+    """Ask the running application to reboot into DFU. Returns (label, version, acked)."""
+    kind, handle = _find_app(product, port, serial)
+    if kind == "console":
+        p, ver, ack = console_cdc.console_enter_dfu(handle)
+        return f"console on {p}", ver, ack
+    if kind == "sensor":
+        sn, ver, ack = sensor_usb.sensor_enter_dfu(handle)
+        return f"sensor module {sn or ''}".strip(), ver, ack
+    raise console_cdc.ConsoleError("no console (0483:A53E) or sensor (0483:5A5A) application found")
+
+
+def _wait_app(product, timeout, serial=None):
+    """Wait for an application to enumerate; returns (kind, handle) or (None, None)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        kind, handle = _find_app(product, None, serial)
+        if kind:
+            return kind, handle
+        time.sleep(0.5)
+    return None, None
+
+
+def _app_version(kind, handle):
+    try:
+        if kind == "console":
+            with console_cdc.ConsoleCdc(handle) as c:
+                return c.version()
+        if kind == "sensor":
+            with sensor_usb.SensorUsb(serial=handle) as s:
+                return s.version()
+    except Exception:
+        pass
+    return "unknown"
 
 SLOT_ADDR      = 0x08020000
 BOOTLOADER_LEN = 0x00020000           # sector 0
@@ -85,16 +149,6 @@ def _verify(image, pem_path, what):
     return info
 
 
-def _wait_console_port(timeout):
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        ports = console_cdc.find_console_ports()
-        if ports:
-            return ports[0]
-        time.sleep(0.5)
-    return None
-
-
 def _ensure_dfu_device(args):
     """Return True when a DFU device is present, entering DFU from the app if needed."""
     if STM32DFU.wait_for_device(0.5, present=True, serial=args.serial):
@@ -102,11 +156,11 @@ def _ensure_dfu_device(args):
     if getattr(args, "skip_enter_dfu", False):
         return False
     try:
-        port, ver, ack = console_cdc.console_enter_dfu(getattr(args, "port", None))
+        label, ver, ack = _app_enter_dfu(args.product, getattr(args, "port", None), getattr(args, "app_serial", None))
     except console_cdc.ConsoleError as e:
-        _say(f"  no DFU device and no console application: {e}")
+        _say(f"  no DFU device and no application: {e}")
         return False
-    _say(f"  console on {port}, application {ver or 'version unknown'}: DFU request "
+    _say(f"  {label}, application {ver or 'version unknown'}: DFU request "
          f"{'acknowledged' if ack else 'sent (no reply)'}")
     _say(f"  waiting for the bootloader DFU device (up to {T_DFU_APPEAR:.0f}s)...")
     return STM32DFU.wait_for_device(T_DFU_APPEAR, present=True, serial=args.serial)
@@ -119,10 +173,10 @@ def cmd_enter_dfu(args):
         _say("A DFU device is already present.")
     else:
         try:
-            port, ver, ack = console_cdc.console_enter_dfu(args.port)
+            label, ver, ack = _app_enter_dfu(args.product, args.port, args.app_serial)
         except console_cdc.ConsoleError as e:
             raise SystemExit(f"Error: {e}")
-        _say(f"Console on {port}, application {ver or 'version unknown'}: DFU request "
+        _say(f"{label[0].upper() + label[1:]}, application {ver or 'version unknown'}: DFU request "
              f"{'acknowledged' if ack else 'sent (no reply)'}.")
         _say(f"Waiting for the DFU device (up to {args.timeout:.0f}s)...")
         if not STM32DFU.wait_for_device(args.timeout, present=True, serial=args.serial):
@@ -184,8 +238,8 @@ def _path_bootloader_10x(dfu, args, updater, signed, ver_str):
     _say(f"\nStep 2/3  waiting for the new bootloader's DFU (up to {T_UPDATER_CYCLE:.0f}s)...")
     STM32DFU.wait_for_device(15.0, present=False, serial=args.serial)
     if not STM32DFU.wait_for_device(T_UPDATER_CYCLE, present=True, serial=args.serial):
-        if console_cdc.find_console_ports():
-            raise SystemExit("Error: the console came back as an application, not in DFU. The 1.0.0 "
+        if _find_app(args.product)[0]:
+            raise SystemExit("Error: the unit came back as an application, not in DFU. The old "
                              "bootloader may have refused the updater (check UART4). Nothing in sector 0 changed.")
         raise SystemExit("Error: no DFU device after the updater ran. If all three LEDs blink, sector 0 "
                          "programming failed: bench recovery (SWD) required. Otherwise check UART4.")
@@ -197,7 +251,7 @@ def cmd_migrate(args):
 
     _say("\nDevice")
     if not _ensure_dfu_device(args):
-        raise SystemExit("Error: no DFU device. Connect exactly one console (application or DFU) and retry.")
+        raise SystemExit("Error: no DFU device. Connect exactly one unit (application or DFU) and retry.")
 
     with STM32DFU() as dfu:
         dfu.connect(serial=args.serial)
@@ -265,33 +319,37 @@ def cmd_migrate(args):
                                  "build leaves its 1.8.99 header there; the slot must then be cleared on the bench.")
             _say("  downloaded; the bootloader verifies the image and launches it.")
 
-    _say(f"\nWaiting for the console application (up to {T_APP_APPEAR:.0f}s)...")
-    port = _wait_console_port(T_APP_APPEAR)
-    if port is None:
+    _say(f"\nWaiting for the application (up to {T_APP_APPEAR:.0f}s)...")
+    kind, handle = _wait_app(args.product, T_APP_APPEAR, getattr(args, "app_serial", None))
+    if kind is None:
         raise SystemExit("Error: the application did not enumerate. Check UART4; a DFU device still present "
                          "means the bootloader refused the image.")
-    try:
-        with console_cdc.ConsoleCdc(port) as c:
-            app_ver = c.version()
-    except Exception:
-        app_ver = "unknown"
-    _say(f"Done. Console on {port}, application {app_ver}"
+    time.sleep(1.0)
+    app_ver = _app_version(kind, handle)
+    where = f"console on {handle}" if kind == "console" else f"sensor module {handle or ''}".strip()
+    _say(f"Done. {where[0].upper() + where[1:]}, application {app_ver}"
          + (f", bootloader 1.2.x (updater {u_info.version_str})" if did_updater else "") + ".")
 
 
 def add_subcommands(sub):
-    p = sub.add_parser("enter-dfu", help="Ask a running console application to reboot into DFU and report the bootloader")
-    p.add_argument("--port", default=None, help="Console COM port (default: the single 0483:A53E port)")
+    def product_args(sp):
+        sp.add_argument("--product", choices=("auto", "console", "sensor"), default="auto",
+                        help="Which application to look for on USB (default: whichever is present)")
+        sp.add_argument("--port", default=None, help="Console COM port (default: the single 0483:A53E port)")
+        sp.add_argument("--app-serial", default=None, help="Sensor module USB serial when several are attached")
+
+    p = sub.add_parser("enter-dfu", help="Ask a running console/sensor application to reboot into DFU and report the bootloader")
+    product_args(p)
     p.add_argument("--timeout", type=float, default=T_DFU_APPEAR, help="Seconds to wait for the DFU device")
     p.set_defaults(func=cmd_enter_dfu)
 
-    m = sub.add_parser("migrate", help="Bootloader 1.0.x -> 1.2.0 migration: updater, then the signed application")
+    m = sub.add_parser("migrate", help="Old bootloader -> 1.2.0 migration: updater, then the signed application")
+    product_args(m)
     m.add_argument("--updater", required=True, help="Signed updater image (old key), e.g. open-motion-console-bl-updater-1.8.99-bl1.2.0-rc.1-signed.bin")
     m.add_argument("--signed", required=True, help="Signed application image for bootloader 1.2.0 (new key)")
     m.add_argument("--production", default=None, help="Production image (bootloader+app) for bare-metal units in the ROM loader")
     m.add_argument("--legacy-public-key", default=DEFAULT_LEGACY_PUBLIC_KEY, help="Public key bootloader 1.0.0 trusts")
     m.add_argument("--public-key", default=str(DEFAULT_PUBLIC_KEY), help="Public key bootloader 1.2.0 trusts")
-    m.add_argument("--port", default=None, help="Console COM port to send the DFU request to")
     m.add_argument("--skip-enter-dfu", action="store_true", help="Do not look for a console application; require a DFU device")
     m.add_argument("--yes", action="store_true", help="Proceed with the irreversible steps without the extra prompt")
     m.set_defaults(func=cmd_migrate)
