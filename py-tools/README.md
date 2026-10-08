@@ -386,6 +386,46 @@ It is reported in two places:
 
 ---
 
+## 8. Migrating fielded consoles to bootloader 1.2.0
+
+Units in the field run bootloader **1.0.0** (RDP 0, old signing key). Bootloader 1.2.0
+trusts only the Google Cloud KMS key, so a unit must get the new bootloader before any
+clinical image will run on it. `flash_firmware.py migrate` does the whole sequence over
+USB, no case opening:
+
+```sh
+# inputs come from the private bucket gs://openwater-firmware-artifacts
+#   open-motion-console-bl-updater/<tag>/open-motion-console-bl-updater-<tag>-bl<bl>-signed.bin
+#   openmotion-console-fw/<tag>/openmotion-console-fw-<tag>-signed.bin
+python flash_firmware.py migrate \
+    --updater open-motion-console-bl-updater-1.8.99-bl1.2.0-rc.1-signed.bin \
+    --signed  openmotion-console-fw-1.8.2-rc.0-signed.bin --yes
+```
+
+What happens, by starting state (the tool detects it):
+
+| Found | Steps |
+|---|---|
+| console application on USB (0483:A53E) | `OW_CMD_DFU` over the CDC port, then as below |
+| DFU, bootloader `1.0.x` | erase the slot, flash the **updater** (old key, FwVersion 1.8.99). The updater rewrites sector 0 with bootloader 1.2.0 and resets into its DFU; the tool waits for it, checks `version` is `1.2.x`, then flashes the **signed application** (new key). |
+| DFU, bootloader `1.2.x` | flash the signed application only |
+| DFU, STM32 ROM loader (bare-metal unit) | needs `--production <bootloader+app>`: erase sectors 0-5, write it at `0x08000000`, leave DFU. Not yet exercised on hardware. |
+
+Both images are verified on the host first: the updater against `keys/ecdsa_public_legacy_1.0.0.pem`
+(what 1.0.0 trusts), the application against `keys/ecdsa_public.pem`. With `--production` the
+tool also checks that the updater embeds the same bootloader the production image carries.
+
+Rules on the bench and in the field: mains power, do not unplug USB, one console on the bus.
+IND1+IND2 on means sector 0 is being rewritten (a few seconds); all three LEDs blinking means
+the rewrite failed and the unit needs SWD recovery. The updater refuses, without touching
+sector 0, if the option bytes are not in the 1.0.0 state (RDP 0, no WRP, no PCROP); the unit
+then comes back in the old bootloader's DFU.
+
+`python flash_firmware.py enter-dfu` alone puts a running console into DFU and prints the
+bootloader version and DFU flavour. Windows needs the WinUSB driver (Zadig) on the DFU
+device; the CDC port uses the inbox usbser driver. Design: `PLAN-console-migration.md`;
+updater source: `open-motion-console-bl-updater`.
+
 ## Flash memory map
 
 Defined in `Core/Inc/memory_map.h` (single source of truth). 2 MB flash, 16 × 128 KB sectors:
