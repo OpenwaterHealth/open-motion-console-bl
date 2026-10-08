@@ -409,7 +409,7 @@ What happens, by starting state (the tool detects it):
 | console application on USB (0483:A53E) | `OW_CMD_DFU` over the CDC port, then as below |
 | DFU, bootloader `1.0.x` | erase the slot, flash the **updater** (old key, FwVersion 1.8.99). The updater rewrites sector 0 with bootloader 1.2.0 and resets into its DFU; the tool waits for it, checks `version` is `1.2.x`, then flashes the **signed application** (new key). |
 | DFU, bootloader `1.2.x` | flash the signed application only |
-| DFU, STM32 ROM loader (bare-metal unit) | needs `--production <bootloader+app>`: erase sectors 0-5, write it at `0x08000000`, leave DFU. Not yet exercised on hardware. |
+| DFU, STM32 ROM loader (bare-metal unit) | needs `--production <bootloader+app>`: erase sectors 0-5, write it at `0x08000000`; the ROM jumps to the new bootloader on manifestation, which applies its option bytes and launches the application. Verified on the bench 2026-10-08 (about 50 s). |
 
 Both images are verified on the host first: the updater against `keys/ecdsa_public_legacy_1.0.0.pem`
 (what 1.0.0 trusts), the application against `keys/ecdsa_public.pem`. With `--production` the

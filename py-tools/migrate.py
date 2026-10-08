@@ -218,7 +218,15 @@ def cmd_migrate(args):
             dfu.set_rom_mode()
             dfu.erase_range(FLASH_BASE, ROM_ERASE_END, progress_cb=_progress)
             dfu.download(FLASH_BASE, production, progress_cb=_progress, pre_erased=True)
-            dfu.leave_dfu()
+            # The zero-length DNLOAD that ends download() is the DfuSe manifestation; the
+            # ROM loader jumps to the image right there (seen on the bench 2026-10-08), so
+            # the device is normally gone before this explicit leave. Keep it for a ROM
+            # that waits for one, tolerate its absence.
+            try:
+                dfu.leave_dfu()
+            except Exception:
+                pass
+            _say("  written; the ROM loader starts the new bootloader, which applies its option bytes and launches the application.")
             did_updater = False
         else:
             ver_str = dfu.read_version()
